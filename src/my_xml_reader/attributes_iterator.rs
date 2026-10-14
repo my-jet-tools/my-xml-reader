@@ -1,3 +1,5 @@
+use super::xml_utils::{is_xml_whitespace, skip_whitespaces};
+
 pub struct AttributesIterator<'s> {
     data: &'s [u8],
     pos: usize,
@@ -7,150 +9,95 @@ impl<'s> AttributesIterator<'s> {
     pub fn new(data: &'s [u8]) -> Self {
         Self {
             data,
-            pos: find_start_of_attribute(data),
+            pos: find_end_of_tag_name(data),
         }
     }
 
     pub fn get_next(&mut self) -> Option<(&'s str, &'s str)> {
-        let pos = self.pos;
-
-        if pos >= self.data.len() {
-            return None;
+        match read_attribute(self.data, self.pos) {
+            Some((key, value, next_pos)) => {
+                self.pos = next_pos;
+                Some((key, value))
+            }
+            None => {
+                // End of the tag or a malformed attribute - nothing to read anymore
+                self.pos = self.data.len();
+                None
+            }
         }
-
-        if self.data[pos] == b'/' {
-            return None;
-        }
-
-        if self.data[pos] == b'>' {
-            return None;
-        }
-
-        let result = extract_attr_and_value(&self.data[pos..]).unwrap();
-
-        self.pos = pos + result.len;
-
-        result.key_value
     }
 }
 
-fn find_start_of_attribute(data: &[u8]) -> usize {
-    let mut found_space = false;
+impl<'s> Iterator for AttributesIterator<'s> {
+    type Item = (&'s str, &'s str);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.get_next()
+    }
+}
+
+fn find_end_of_tag_name(data: &[u8]) -> usize {
     for (i, b) in data.iter().enumerate() {
         let b = *b;
 
-        if found_space {
-            match b {
-                b'/' => {
-                    return data.len();
-                }
-                b'>' => {
-                    return data.len();
-                }
-                b' ' => {}
-                _ => return i,
-            }
-        } else {
-            match b {
-                b' ' => {
-                    found_space = true;
-                }
-                b'/' => {
-                    return data.len();
-                }
-                b'>' => {
-                    return data.len();
-                }
-                _ => {}
-            }
+        if is_xml_whitespace(b) || b == b'/' || b == b'>' {
+            return i;
         }
     }
 
     data.len()
 }
 
-fn extract_attr_and_value<'s>(src: &'s [u8]) -> Result<FoundTagData<'s>, String> {
-    let mut attr_start = None;
-    let mut eq_pos = None;
-    let mut end_pos = src.len();
+// Reads key="value" or key='value' starting from pos.
+// Returns the key, the value and the position right after the closing quote
+fn read_attribute(data: &[u8], pos: usize) -> Option<(&str, &str, usize)> {
+    let key_start = skip_whitespaces(data, pos);
+    let mut key_end = key_start;
 
-    let mut quote_amount = 0;
+    while key_end < data.len() {
+        let b = data[key_end];
 
-    let mut esc_charged = false;
-
-    for (i, b) in src.iter().enumerate() {
-        let b = *b;
-        if eq_pos.is_none() {
-            if attr_start.is_none() {
-                if b == b' ' {
-                    continue;
-                }
-
-                attr_start = Some(i);
-            }
-            match b {
-                b'=' => eq_pos = Some(i),
-                b'>' => {
-                    return Ok(FoundTagData {
-                        key_value: None,
-                        len: i,
-                    });
-                }
-                b'/' => {
-                    return Ok(FoundTagData {
-                        key_value: None,
-                        len: i,
-                    });
-                }
-                _ => {}
-            }
-        } else {
-            if esc_charged {
-                esc_charged = false;
-                continue;
-            }
-
-            match b {
-                b'"' => {
-                    quote_amount += 1;
-                }
-                b'\\' => {
-                    esc_charged = true;
-                }
-                _ => {}
-            }
-
-            if quote_amount == 2 {
-                end_pos = i;
-                break;
-            }
+        if is_xml_whitespace(b) || b == b'=' || b == b'/' || b == b'>' {
+            break;
         }
+
+        key_end += 1;
     }
 
-    let Some(eq_pos) = eq_pos else {
-        return Err("Can not read attribute. Eq position is not found".to_string());
-    };
+    if key_end == key_start {
+        return None;
+    }
 
-    let attr_start = attr_start.unwrap();
+    let eq_pos = skip_whitespaces(data, key_end);
 
-    let result = FoundTagData {
-        key_value: Some((
-            std::str::from_utf8(&src[attr_start..eq_pos]).unwrap(),
-            std::str::from_utf8(&src[eq_pos + 2..end_pos]).unwrap(),
-        )),
-        len: end_pos + 1,
-    };
+    if data.get(eq_pos) != Some(&b'=') {
+        return None;
+    }
 
-    Ok(result)
+    let quote_pos = skip_whitespaces(data, eq_pos + 1);
+    let quote = *data.get(quote_pos)?;
+
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+
+    // There are no escapes with '\' in XML - the value ends with the first matching quote
+    let value_start = quote_pos + 1;
+    let value_end = value_start + data[value_start..].iter().position(|b| *b == quote)?;
+
+    let key = std::str::from_utf8(&data[key_start..key_end]).ok()?;
+    let value = std::str::from_utf8(&data[value_start..value_end]).ok()?;
+
+    Some((key, value, value_end + 1))
 }
 
-pub struct FoundTagData<'s> {
-    pub key_value: Option<(&'s str, &'s str)>,
-    pub len: usize,
-}
 #[cfg(test)]
 mod tests {
     use crate::my_xml_reader::AttributesIterator;
+
+    fn read_all(xml: &str) -> Vec<(&str, &str)> {
+        AttributesIterator::new(xml.as_bytes()).collect()
+    }
 
     #[test]
     fn test_tags_iterator_with_no_attrs() {
@@ -193,5 +140,65 @@ mod tests {
 
         assert_eq!(next.0, "attr2");
         assert_eq!(next.1, "value2");
+
+        assert!(attrs_iterator.get_next().is_none());
+    }
+
+    #[test]
+    fn test_attributes_separated_by_tabs_and_new_lines() {
+        let xml = "<test\tattr1=\"value1\"\r\n    attr2=\"value2\"\n/>";
+
+        assert_eq!(
+            vec![("attr1", "value1"), ("attr2", "value2")],
+            read_all(xml)
+        );
+    }
+
+    #[test]
+    fn test_single_quoted_attributes() {
+        let xml = r#"<test attr1='value1' attr2='say "hi"'>"#;
+
+        assert_eq!(
+            vec![("attr1", "value1"), ("attr2", "say \"hi\"")],
+            read_all(xml)
+        );
+    }
+
+    #[test]
+    fn test_spaces_around_eq() {
+        let xml = r#"<test attr1 = "value1" attr2= "value2" >"#;
+
+        assert_eq!(
+            vec![("attr1", "value1"), ("attr2", "value2")],
+            read_all(xml)
+        );
+    }
+
+    #[test]
+    fn test_backslash_is_not_an_escape() {
+        let xml = r#"<test path="C:\" attr2="value2"/>"#;
+
+        assert_eq!(vec![("path", r"C:\"), ("attr2", "value2")], read_all(xml));
+    }
+
+    #[test]
+    fn test_special_symbols_inside_value() {
+        let xml = r#"<test attr1="a/>b" attr2="" attr3="&amp;"/>"#;
+
+        assert_eq!(
+            vec![("attr1", "a/>b"), ("attr2", ""), ("attr3", "&amp;")],
+            read_all(xml)
+        );
+    }
+
+    #[test]
+    fn test_malformed_attribute_stops_iteration() {
+        let xml = r#"<test attr1="value1" attr2 attr3="value3"/>"#;
+
+        assert_eq!(vec![("attr1", "value1")], read_all(xml));
+
+        let xml = r#"<test attr1="value1/>"#;
+
+        assert!(read_all(xml).is_empty());
     }
 }

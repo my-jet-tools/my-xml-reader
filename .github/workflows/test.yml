@@ -2,12 +2,13 @@ name: Test our build
 
 on:
   push:
-    branches: [ "*" ]
+    branches: [ "**" ]
   pull_request:
-    branches: [ "*" ]
 
 jobs:
   test:
+    # PRs from branches of this repository are already tested by the push trigger
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
 
     runs-on: ubuntu-latest
 

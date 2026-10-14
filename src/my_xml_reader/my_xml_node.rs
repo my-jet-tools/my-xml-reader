@@ -12,12 +12,9 @@ impl<'t> MyXmlNode<'t> {
     }
 
     pub fn get_inner_content(&self) -> Option<&'t [u8]> {
-        let result = match &self.close_node {
-            Some(close_node) => Some(&self.xml[self.open_node.end_pos + 1..close_node.start_pos]),
-            None => None,
-        };
-
-        result
+        self.close_node
+            .as_ref()
+            .map(|close_node| &self.xml[self.open_node.end_pos + 1..close_node.start_pos])
     }
 
     pub fn get_value(&self) -> Option<String> {
@@ -29,7 +26,7 @@ impl<'t> MyXmlNode<'t> {
             return Some(super::xml_utils::decode_xml_string(value));
         }
 
-        return Some(value.to_string());
+        Some(value.to_string())
     }
 
     pub fn get_xml(&self) -> &'t str {
@@ -38,6 +35,6 @@ impl<'t> MyXmlNode<'t> {
             None => &self.xml[self.open_node.start_pos..self.open_node.end_pos + 1],
         };
 
-        return std::str::from_utf8(xml).unwrap();
+        std::str::from_utf8(xml).unwrap()
     }
 }

@@ -12,14 +12,14 @@ Small, forward-only XML helper aimed at lightweight parsing in constrained conte
 
 ## Getting started
 Add the crate to your `Cargo.toml` (use the path form if you're working in this repo):
-```
+```toml
 [dependencies]
 my-xml-reader = { path = "../my-xml-reader" }
 ```
 
 ## Quick example
 ```rust
-use my_xml_reader::{MyXmlReader, MyXmlNode};
+use my_xml_reader::MyXmlReader;
 
 fn main() -> Result<(), String> {
     let xml = r#"<?xml version="1.0"?>
@@ -54,34 +54,46 @@ fn main() -> Result<(), String> {
 }
 ```
 
+## Paths
+- `find_the_open_node("A/B/C")` scans forward for the first `C` whose parent is `B` and whose grandparent is `A`. Each `/` means a direct child; the first segment (`A`) can be at any depth.
+- `find_the_node_inside_parent(&parent, "B/C")` does the same, but only inside `parent`. It returns `None` once the closing tag of `parent` is reached.
+- A single name (`"C"`) matches a node at any depth: inside a parent it is the first `C` among all its descendants, not only among its children.
+- `find_any_of_these_nodes_inside_parent` accepts the same paths and returns the first node matching any of them.
+
 ## Working with attributes
 ```rust
 use my_xml_reader::MyXmlReader;
 
-let xml = r#"<Item id="42" name="Widget" enabled="true"/>"#;
-let mut reader = MyXmlReader::from_slice(xml.as_bytes())?;
-let tag = reader.read_next_tag()?.unwrap(); // first tag is <Item .../>
+fn main() -> Result<(), String> {
+    let xml = r#"<Item id="42" name='Widget' enabled = "true"/>"#;
+    let mut reader = MyXmlReader::from_slice(xml.as_bytes())?;
+    let tag = reader.read_next_tag()?.unwrap(); // first tag is <Item .../>
 
-for (k, v) in tag.iterate_attributes() {
-    println!("{k} = {v}");
+    for (k, v) in tag.iterate_attributes() {
+        println!("{k} = {v}");
+    }
+
+    Ok(())
 }
 ```
+Values are returned exactly as they are in the source, so escapes such as `&amp;` are not decoded. Use `my_xml_reader::my_xml_reader::xml_utils::decode_xml_string` when you need the decoded value.
 
 ## Key types
 - `MyXmlReader<'t>`: streaming cursor over the input slice; maintains nesting with `opened_nodes`.
 - `XmlTagInfo<'t>`: view of a single tag (`name`, `raw`, `tag_type`, `level`, positions); can iterate attributes.
 - `MyXmlNode<'t>`: represents an open/close pair; provides `get_xml()`, `get_inner_content()`, and `get_value()` (decodes escapes).
-- `AttributesIterator<'t>`: zero-copy attribute iterator over a tag's raw bytes.
+- `AttributesIterator<'t>`: zero-copy attribute iterator over a tag's raw bytes; implements `Iterator`.
 - `XmlTagType`: enum of `Open`, `Close`, `OpenClose`.
 
 ## Behavioral notes
 - Forward-only: the reader consumes input as you call `read_next_tag`/find functions; it does not rewind.
+- Only a UTF-8 BOM, whitespaces and the XML header are allowed before the root tag, and only whitespaces after the last tag. Any other text there is an error.
 - Basic XML coverage: no namespace handling, comments, CDATA, or validation. Input should be well-formed for best results.
 - Escape decoding is limited to the five common entities; others pass through unchanged.
 - Errors are returned as `String`; no custom error type yet.
 
 ## Testing
-Run the built-in suite:
-```
+Run the built-in suite (the examples in this README are compiled and run as doc tests):
+```sh
 cargo test
 ```

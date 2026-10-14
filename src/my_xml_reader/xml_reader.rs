@@ -29,45 +29,7 @@ impl<'t> MyXmlReader<'t> {
         parent_tag: &XmlTagInfo<'t>,
         x_path: &str,
     ) -> Result<Option<XmlTagInfo<'t>>, String> {
-        let paths = x_path.split('/');
-
-        let mut result: Option<XmlTagInfo<'t>> = None;
-
-        for node_name in paths {
-            loop {
-                {
-                    let node = self.read_next_tag()?;
-
-                    if node.is_none() {
-                        break;
-                    }
-
-                    let node = node.unwrap();
-
-                    match node.tag_type {
-                        XmlTagType::Open => {
-                            if node_name == node.name {
-                                result = Some(node);
-                                break;
-                            }
-                        }
-                        XmlTagType::OpenClose => {
-                            if node_name == node.name {
-                                result = Some(node);
-                                break;
-                            }
-                        }
-                        XmlTagType::Close => {
-                            if parent_tag.level == node.level && parent_tag.name == node.name {
-                                return Ok(None);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        return Ok(result);
+        self.find_any_of_these_nodes_inside_parent(parent_tag, &[x_path])
     }
 
     pub fn find_any_of_these_nodes_inside_parent(
@@ -75,35 +37,31 @@ impl<'t> MyXmlReader<'t> {
         parent_tag: &XmlTagInfo<'t>,
         node_names: &[&str],
     ) -> Result<Option<XmlTagInfo<'t>>, String> {
+        if matches!(parent_tag.tag_type, XmlTagType::OpenClose) {
+            // Self-closing node has no children
+            return Ok(None);
+        }
+
         loop {
-            {
-                let node = self.read_next_tag()?;
+            let node = self.read_next_tag()?;
 
-                if node.is_none() {
-                    return Ok(None);
+            if node.is_none() {
+                return Ok(None);
+            }
+
+            let node = node.unwrap();
+
+            match node.tag_type {
+                XmlTagType::Open | XmlTagType::OpenClose => {
+                    for x_path in node_names {
+                        if self.is_path_matched(&node, x_path, parent_tag.level + 1) {
+                            return Ok(Some(node));
+                        }
+                    }
                 }
-
-                let node = node.unwrap();
-
-                match node.tag_type {
-                    XmlTagType::Open => {
-                        for node_name in node_names {
-                            if *node_name == node.name {
-                                return Ok(Some(node));
-                            }
-                        }
-                    }
-                    XmlTagType::OpenClose => {
-                        for node_name in node_names {
-                            if *node_name == node.name {
-                                return Ok(Some(node));
-                            }
-                        }
-                    }
-                    XmlTagType::Close => {
-                        if parent_tag.level == node.level && parent_tag.name == node.name {
-                            return Ok(None);
-                        }
+                XmlTagType::Close => {
+                    if parent_tag.level == node.level && parent_tag.name == node.name {
+                        return Ok(None);
                     }
                 }
             }
@@ -115,51 +73,50 @@ impl<'t> MyXmlReader<'t> {
     }
 
     pub fn find_the_open_node(&mut self, x_path: &str) -> Result<Option<XmlTagInfo<'t>>, String> {
-        let mut segments = x_path.split('/').peekable();
-        let mut current_parent: Option<XmlTagInfo<'t>> = None;
+        loop {
+            let node = self.read_next_tag()?;
 
-        while let Some(segment) = segments.next() {
-            let is_last = segments.peek().is_none();
+            if node.is_none() {
+                return Ok(None);
+            }
 
-            let found = if let Some(parent) = current_parent.as_ref() {
-                self.find_the_node_inside_parent(parent, segment)?
-            } else {
-                // No parent yet: scan forward until we find the desired tag.
-                loop {
-                    let node = self.read_next_tag()?;
+            let node = node.unwrap();
 
-                    if node.is_none() {
-                        break None;
-                    }
-
-                    let node = node.unwrap();
-
-                    match node.tag_type {
-                        XmlTagType::Open | XmlTagType::OpenClose if node.name == segment => {
-                            break Some(node)
-                        }
-                        _ => {}
+            match node.tag_type {
+                XmlTagType::Open | XmlTagType::OpenClose => {
+                    if self.is_path_matched(&node, x_path, 0) {
+                        return Ok(Some(node));
                     }
                 }
-            };
-
-            let Some(found_node) = found else {
-                return Ok(None);
-            };
-
-            if is_last {
-                return Ok(Some(found_node));
+                XmlTagType::Close => {}
             }
+        }
+    }
 
-            if matches!(found_node.tag_type, XmlTagType::OpenClose) {
-                // Self-closing node cannot contain deeper segments
-                return Ok(None);
-            }
+    // The last segment of x_path is the node itself, every previous segment must be
+    // the direct parent of the next one. The first segment can be at any level >= min_level
+    fn is_path_matched(&self, node: &XmlTagInfo<'t>, x_path: &str, min_level: usize) -> bool {
+        let mut segments = x_path.rsplit('/');
 
-            current_parent = Some(found_node);
+        if node.level < min_level || segments.next() != Some(node.name) {
+            return false;
         }
 
-        Ok(None)
+        let mut level = node.level;
+
+        for segment in segments {
+            if level == min_level {
+                return false;
+            }
+
+            level -= 1;
+
+            if self.opened_nodes[level].name != segment {
+                return false;
+            }
+        }
+
+        true
     }
 
     fn move_to_the_next_open_tag_pos(&mut self) -> Result<bool, String> {
@@ -171,17 +128,26 @@ impl<'t> MyXmlReader<'t> {
             return Ok(true);
         }
 
-        let next_pos = super::xml_utils::find_next_token(&self.xml, b'<', self.current_pos);
+        let next_pos = super::xml_utils::find_next_token(self.xml, b'<', self.current_pos);
 
         match next_pos {
             Some(pos) => {
                 self.current_pos = pos;
                 Ok(true)
             }
-            None => Err(format!(
-                "Can not find the next open tag positin from pos {}",
-                self.current_pos
-            )),
+            None => {
+                // Whitespaces after the last tag (e.g. a trailing new line) are not an error
+                let rest = &self.xml[self.current_pos..];
+
+                if rest.iter().all(|b| super::xml_utils::is_xml_whitespace(*b)) {
+                    return Ok(false);
+                }
+
+                Err(format!(
+                    "Can not find the next open tag position from pos {}",
+                    self.current_pos
+                ))
+            }
         }
     }
 
@@ -230,10 +196,10 @@ impl<'t> MyXmlReader<'t> {
             XmlTagType::OpenClose => {}
         }
 
-        return Ok(Some(tag_info));
+        Ok(Some(tag_info))
     }
 
-    fn find_corelated_closed_node(
+    fn find_correlated_closed_node(
         &mut self,
         node_level: usize,
         node_name: &str,
@@ -249,8 +215,6 @@ impl<'t> MyXmlReader<'t> {
             }
 
             let next_node = next_node.unwrap();
-
-            self.current_pos = next_node.end_pos + 1;
 
             if matches!(next_node.tag_type, XmlTagType::Close)
                 && next_node.level == node_level
@@ -275,15 +239,15 @@ impl<'t> MyXmlReader<'t> {
             return Ok(result);
         }
 
-        let close_node = self.find_corelated_closed_node(open_node.level, &open_node.name)?;
+        let close_node = self.find_correlated_closed_node(open_node.level, open_node.name)?;
 
-        let reuslt = MyXmlNode {
+        let result = MyXmlNode {
             xml: self.xml,
             open_node,
             close_node: Some(close_node),
         };
 
-        return Ok(reuslt);
+        Ok(result)
     }
 
     fn scan_for_the_next_tag(&mut self) -> Result<Option<XmlTagInfo<'t>>, String> {
@@ -292,11 +256,7 @@ impl<'t> MyXmlReader<'t> {
         }
 
         let start_pos = self.current_pos;
-        let end_of_open_tag_pos = super::xml_utils::find_next_token(
-            self.xml,
-            super::xml_utils::CLOSE_TAG_TOKEN,
-            self.current_pos,
-        );
+        let end_of_open_tag_pos = super::xml_utils::find_end_of_tag(self.xml, self.current_pos);
 
         if end_of_open_tag_pos.is_none() {
             return Err(format!(
@@ -329,14 +289,15 @@ impl<'t> MyXmlReader<'t> {
         };
 
         if matches!(result.tag_type, XmlTagType::Close) {
-            result.level -= 1;
+            // Close tag without opened tags is reported as an error by read_next_tag
+            result.level = result.level.saturating_sub(1);
         }
 
         Ok(Some(result))
     }
 
     pub fn get_level(&self) -> usize {
-        return self.opened_nodes.len();
+        self.opened_nodes.len()
     }
 }
 
@@ -456,7 +417,7 @@ mod tests {
             .find_the_node_inside_parent(&array_node, "Tag1")
             .unwrap();
 
-        assert_eq!(true, found.is_none());
+        assert!(found.is_none());
     }
 
     #[test]
@@ -485,7 +446,7 @@ mod tests {
             .find_the_node_inside_parent(&array_node, "I")
             .unwrap();
 
-        assert_eq!(true, el_item.is_none());
+        assert!(el_item.is_none());
         assert_eq!("<S2>V2</S2></R>", reader.get_unread_slice())
     }
 
@@ -530,8 +491,124 @@ mod tests {
             }
         }
 
-        assert_eq!(true, found_s1);
-        assert_eq!(true, found_s2);
+        assert!(found_s1);
+        assert!(found_s2);
         assert_eq!("</R>", reader.get_unread_slice())
+    }
+
+    #[test]
+    fn test_trailing_whitespaces_are_not_an_error() {
+        let xml_src = "<R><A/></R>\r\n";
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        assert!(reader.find_the_open_node("Missing").unwrap().is_none());
+        assert!(reader.read_next_tag().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_trailing_text_is_an_error() {
+        let xml_src = "<R><A/></R>garbage";
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        assert!(reader.find_the_open_node("Missing").is_err());
+    }
+
+    #[test]
+    fn test_close_tag_without_opened_tags_is_an_error() {
+        let xml_src = "<a></a></b>";
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        assert!(reader.read_next_tag().unwrap().is_some());
+        assert!(reader.read_next_tag().unwrap().is_some());
+        assert!(reader.read_next_tag().is_err());
+    }
+
+    #[test]
+    fn test_close_tag_token_inside_attribute_value() {
+        let xml_src = r#"<R><A f="a>b" g='/>'>Val</A></R>"#;
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        let found = reader.find_the_open_node("R/A").unwrap().unwrap();
+
+        assert_eq!(r#"<A f="a>b" g='/>'>"#, found.raw_as_string());
+        assert!(matches!(found.tag_type, XmlTagType::Open));
+
+        let whole_node = reader.read_the_whole_node(found).unwrap();
+        assert_eq!("Val", whole_node.get_value().unwrap());
+    }
+
+    #[test]
+    fn test_x_path_segments_are_direct_children() {
+        let xml_src = r#"<R><A><B><C>Deep</C></B></A><C>Direct</C></R>"#;
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        let found = reader.find_the_open_node("R/C").unwrap().unwrap();
+        let whole_node = reader.read_the_whole_node(found).unwrap();
+
+        assert_eq!("Direct", whole_node.get_value().unwrap());
+    }
+
+    #[test]
+    fn test_single_name_is_found_at_any_level() {
+        let xml_src = r#"<R><A><B><C>Deep</C></B></A><C>Direct</C></R>"#;
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        let root = reader.find_the_open_node("R").unwrap().unwrap();
+        let found = reader.find_the_node_inside_parent(&root, "C").unwrap();
+        let whole_node = reader.read_the_whole_node(found.unwrap()).unwrap();
+
+        assert_eq!("Deep", whole_node.get_value().unwrap());
+    }
+
+    #[test]
+    fn test_x_path_is_found_in_the_second_branch() {
+        let xml_src = r#"<R><A><X/></A><A><B>Val</B></A></R>"#;
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        let found = reader.find_the_open_node("R/A/B").unwrap().unwrap();
+        let whole_node = reader.read_the_whole_node(found).unwrap();
+
+        assert_eq!("Val", whole_node.get_value().unwrap());
+    }
+
+    #[test]
+    fn test_x_path_inside_parent() {
+        let xml_src =
+            r#"<R><P><A></A><B>Wrong</B><A><B>Right</B></A></P><A><B>Outside</B></A></R>"#;
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        let parent = reader.find_the_open_node("R/P").unwrap().unwrap();
+
+        let found = reader.find_the_node_inside_parent(&parent, "A/B").unwrap();
+        let whole_node = reader.read_the_whole_node(found.unwrap()).unwrap();
+        assert_eq!("Right", whole_node.get_value().unwrap());
+
+        let found = reader.find_the_node_inside_parent(&parent, "A/B").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_nothing_is_found_inside_self_closing_parent() {
+        let xml_src = r#"<R><P/><Q><X/></Q></R>"#;
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        let parent = reader.find_the_open_node("R/P").unwrap().unwrap();
+
+        let found = reader.find_the_node_inside_parent(&parent, "X").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_attributes_outlive_the_tag() {
+        fn read_attributes<'t>(tag: XmlTagInfo<'t>) -> Vec<(&'t str, &'t str)> {
+            tag.iterate_attributes().collect()
+        }
+
+        let xml_src = r#"<R a="1" b='2'/>"#;
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        let tag = reader.read_next_tag().unwrap().unwrap();
+
+        assert_eq!(vec![("a", "1"), ("b", "2")], read_attributes(tag));
     }
 }

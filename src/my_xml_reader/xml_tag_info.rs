@@ -19,10 +19,10 @@ pub struct XmlTagInfo<'t> {
 
 impl<'t> XmlTagInfo<'t> {
     pub fn raw_as_string(&self) -> &'t str {
-        std::str::from_utf8(&self.raw).unwrap()
+        std::str::from_utf8(self.raw).unwrap()
     }
 
-    pub fn iterate_attributes(&'t self) -> AttributesIterator<'t> {
+    pub fn iterate_attributes(&self) -> AttributesIterator<'t> {
         AttributesIterator::new(self.raw)
     }
 }
