@@ -1,7 +1,7 @@
 use super::XmlTagType;
 use super::{MyXmlNode, XmlTagInfo};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OpenedNode {
     pub name: String,
     pub start_pos: usize,
@@ -15,7 +15,14 @@ pub struct MyXmlReader<'t> {
 }
 
 impl<'t> MyXmlReader<'t> {
+    /// The XML must be UTF-8 encoded (a UTF-8 BOM is allowed).
+    /// Convert other encodings (e.g. windows-1251) before parsing.
     pub fn from_slice(xml: &'t [u8]) -> Result<Self, String> {
+        // All the &str results are cut from xml on ASCII symbols, so they are valid UTF-8 as long as xml is
+        if let Err(err) = std::str::from_utf8(xml) {
+            return Err(format!("XML must be UTF-8 encoded: {}", err));
+        }
+
         let current_pos = super::xml_utils::init_pos_start(xml)?;
         Ok(Self {
             xml,
@@ -24,6 +31,8 @@ impl<'t> MyXmlReader<'t> {
         })
     }
 
+    /// Scans forward for the node by x_path (see [`Self::find_the_open_node`]) inside parent_tag.
+    /// Returns None once the closing tag of parent_tag is reached.
     pub fn find_the_node_inside_parent(
         &mut self,
         parent_tag: &XmlTagInfo<'t>,
@@ -32,6 +41,7 @@ impl<'t> MyXmlReader<'t> {
         self.find_any_of_these_nodes_inside_parent(parent_tag, &[x_path])
     }
 
+    /// Same as [`Self::find_the_node_inside_parent`], but returns the first node matching any of node_names.
     pub fn find_any_of_these_nodes_inside_parent(
         &mut self,
         parent_tag: &XmlTagInfo<'t>,
@@ -72,6 +82,8 @@ impl<'t> MyXmlReader<'t> {
         std::str::from_utf8(&self.xml[self.current_pos..]).unwrap()
     }
 
+    /// Scans forward for the first node matching x_path. "A/B/C" is the node C whose parent is B
+    /// and grandparent is A; A itself can be at any depth. A single name is matched at any depth.
     pub fn find_the_open_node(&mut self, x_path: &str) -> Result<Option<XmlTagInfo<'t>>, String> {
         loop {
             let node = self.read_next_tag()?;
@@ -251,8 +263,16 @@ impl<'t> MyXmlReader<'t> {
     }
 
     fn scan_for_the_next_tag(&mut self) -> Result<Option<XmlTagInfo<'t>>, String> {
-        if !self.move_to_the_next_open_tag_pos()? {
-            return Ok(None);
+        loop {
+            if !self.move_to_the_next_open_tag_pos()? {
+                return Ok(None);
+            }
+
+            // Comments, CDATA sections, processing instructions and DOCTYPE are not tags
+            match super::xml_utils::find_end_of_special_markup(self.xml, self.current_pos)? {
+                Some(end_pos) => self.current_pos = end_pos + 1,
+                None => break,
+            }
         }
 
         let start_pos = self.current_pos;
@@ -260,7 +280,7 @@ impl<'t> MyXmlReader<'t> {
 
         if end_of_open_tag_pos.is_none() {
             return Err(format!(
-                "Can not find the close. Start pos is {}",
+                "Can not find the end of the tag started at pos {}",
                 start_pos
             ));
         }
@@ -610,5 +630,77 @@ mod tests {
         let tag = reader.read_next_tag().unwrap().unwrap();
 
         assert_eq!(vec![("a", "1"), ("b", "2")], read_attributes(tag));
+    }
+
+    #[test]
+    fn test_comments_and_processing_instructions_are_skipped() {
+        let xml_src = r#"<?xml version="1.0"?>
+            <!-- Generated. Don't edit -->
+            <R>
+              <!-- <A>Commented</A> -->
+              <?pi value?>
+              <A>Val</A>
+              <!-- it's > the end -->
+            </R>
+            <!-- trailing comment -->
+            "#;
+
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        let found = reader.find_the_open_node("R/A").unwrap().unwrap();
+        assert_eq!(1, found.level);
+
+        let whole_node = reader.read_the_whole_node(found).unwrap();
+        assert_eq!("Val", whole_node.get_value().unwrap());
+
+        let close_root = reader.read_next_tag().unwrap().unwrap();
+        assert_eq!("R", close_root.name);
+        assert_eq!(XmlTagType::Close, close_root.tag_type);
+
+        assert!(reader.read_next_tag().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_doctype_is_skipped() {
+        let xml_src = r#"<?xml version="1.0"?><!DOCTYPE R [<!ELEMENT R (A)> <!ENTITY e "]>">]><R><A>Val</A></R>"#;
+
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        let found = reader.find_the_open_node("R/A").unwrap().unwrap();
+        assert_eq!(1, found.level);
+
+        let whole_node = reader.read_the_whole_node(found).unwrap();
+        assert_eq!("Val", whole_node.get_value().unwrap());
+    }
+
+    #[test]
+    fn test_cdata() {
+        let xml_src = r#"<R><A><![CDATA[1 < 2 && </A> &amp;]]> &amp; 3<!-- c --></A><B/></R>"#;
+
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        let found = reader.find_the_open_node("R/A").unwrap().unwrap();
+        let whole_node = reader.read_the_whole_node(found).unwrap();
+
+        assert_eq!("1 < 2 && </A> &amp; & 3", whole_node.get_value().unwrap());
+
+        let found = reader.find_the_open_node("R/B").unwrap().unwrap();
+        assert_eq!("B", found.name);
+    }
+
+    #[test]
+    fn test_not_closed_comment_is_an_error() {
+        let xml_src = r#"<R><!-- not closed <A/></R>"#;
+
+        let mut reader = MyXmlReader::from_slice(xml_src.as_bytes()).unwrap();
+
+        assert!(reader.find_the_open_node("R/A").is_err());
+    }
+
+    #[test]
+    fn test_not_utf8_is_an_error() {
+        let xml_src = b"<R><A>\xcf\xf0\xe8\xe2\xe5\xf2</A></R>"; // windows-1251
+
+        assert!(MyXmlReader::from_slice(xml_src).is_err());
     }
 }

@@ -1,13 +1,13 @@
 use crate::my_xml_reader::AttributesIterator;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XmlTagType {
     Open = 0,
     Close = 1,
     OpenClose = 2,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct XmlTagInfo<'t> {
     pub name: &'t str,
     pub raw: &'t [u8],

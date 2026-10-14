@@ -1,5 +1,6 @@
 use super::XmlTagInfo;
 
+#[derive(Debug, Clone)]
 pub struct MyXmlNode<'t> {
     pub xml: &'t [u8],
     pub open_node: XmlTagInfo<'t>,
@@ -17,16 +18,14 @@ impl<'t> MyXmlNode<'t> {
             .map(|close_node| &self.xml[self.open_node.end_pos + 1..close_node.start_pos])
     }
 
+    /// Inner content with decoded escapes and CDATA sections, without comments.
+    /// None for a self-closing node.
     pub fn get_value(&self) -> Option<String> {
         let inner_content = self.get_inner_content()?;
 
         let value = std::str::from_utf8(inner_content).unwrap();
 
-        if super::xml_utils::has_special_symbol(value) {
-            return Some(super::xml_utils::decode_xml_string(value));
-        }
-
-        Some(value.to_string())
+        Some(super::xml_utils::decode_xml_value(value))
     }
 
     pub fn get_xml(&self) -> &'t str {

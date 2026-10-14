@@ -17,8 +17,17 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          components: clippy, rustfmt
 
-      - name: Build with all features     
+      - name: Check formatting
+        run: |
+          cargo fmt --check
+
+      - name: Clippy
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build with all features
         run: |
           cargo build --all-features
 
